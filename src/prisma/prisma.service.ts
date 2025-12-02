@@ -1,10 +1,11 @@
 import { Injectable, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
-import { PrismaClient } from '../../generated/prisma'; // <-- CAMINHO CORRETO 100%
+import { PrismaClient } from '../../generated/prisma';
 
 @Injectable()
 export class PrismaService extends PrismaClient implements OnModuleInit, OnModuleDestroy {
+  
   async onModuleInit() {
-    await this.$connect(); // funciona no Prisma 7 sim
+    await this.$connect();
   }
 
   async onModuleDestroy() {
