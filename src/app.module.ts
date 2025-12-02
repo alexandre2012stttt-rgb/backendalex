@@ -5,7 +5,10 @@ import { PixModule } from './pix/pix.module';
 import { PrismaModule } from './prisma/prisma.module';
 
 @Module({
-  imports: [PrismaModule, PixModule],
+  imports: [
+    PrismaModule,
+    PixModule,
+  ],
   controllers: [AppController],
   providers: [AppService],
 })
