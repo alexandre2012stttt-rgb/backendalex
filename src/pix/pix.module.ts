@@ -3,11 +3,10 @@ import { Module } from '@nestjs/common';
 import { PixController } from './pix.controller';
 import { PixWebhookController } from './pix.webhook.controller';
 import { PixService } from './pix.service';
-import { PrismaModule } from '../prisma/prisma.module';
+import { PrismaService } from '../prisma/prisma.service';
 
 @Module({
-  imports: [PrismaModule],
   controllers: [PixController, PixWebhookController],
-  providers: [PixService],
+  providers: [PixService, PrismaService],
 })
 export class PixModule {}

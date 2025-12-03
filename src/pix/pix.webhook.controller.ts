@@ -19,21 +19,20 @@ export class PixWebhookController {
   @Post('webhook')
   @HttpCode(200)
   async webhook(@Body() body: any, @Headers() headers: any) {
-    /**
-     * ⚠️ WIINPAY NÃO FORNECE ASSINATURA DOCUMENTADA
-     * Para evitar bloquear webhook válido, aceitamos SEM validação.
-     * Apenas recomenda-se ativar validação quando WiinPay enviar docs oficiais.
-     */
-
     if (!body) {
       throw new BadRequestException('Body vazio');
     }
 
-    this.logger.log(
-      '[WiinPay Webhook Recebido] ' + JSON.stringify(body, null, 2),
-    );
+    this.logger.log('[WiinPay Webhook Recebido] ' + JSON.stringify(body, null, 2));
 
-    // processar pagamento
-    return this.pixService.processarWebhook(body);
+    try {
+      const result = await this.pixService.processarWebhook(headers, body);
+      // Retorna um json simples — WiinPay normalmente apenas procura 200
+      return { ok: true, result };
+    } catch (err) {
+      this.logger.error('Erro ao processar webhook: ' + err.message);
+      // Para evitar retry infinito, retornamos 200 mas com detalhe do erro (ou você pode retornar 500 para forçar retry)
+      return { ok: false, error: err.message };
+    }
   }
 }
