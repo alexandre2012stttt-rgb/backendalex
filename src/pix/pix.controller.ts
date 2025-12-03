@@ -3,94 +3,56 @@ import {
   Controller,
   Post,
   Body,
-  HttpException,
-  HttpStatus,
-  Logger,
+  Get,
+  Param,
+  BadRequestException,
 } from '@nestjs/common';
 import { PixService } from './pix.service';
 
 @Controller('pix')
 export class PixController {
-  private readonly logger = new Logger(PixController.name);
-
   constructor(private readonly pixService: PixService) {}
 
-  // -----------------------------
-  // POST /pix/gerar  (rota antiga)
-  // -----------------------------
+  /**
+   * Criar pagamento PIX – chamado pelo seu FRONT da V0
+   * Rota: POST /pix/gerar
+   */
   @Post('gerar')
-  async gerarPagamento(
-    @Body()
-    body: {
-      valueCents: number;
-      name: string;
-      email: string;
-      planId?: string | null;
-      description?: string;
-    },
-  ) {
-    try {
-      const { payment, raw } = await this.pixService.criarPagamento({
-        valueCents: body.valueCents,
-        name: body.name,
-        email: body.email,
-        planId: body.planId ?? null,
-        description: body.description ?? 'Assinatura VIP',
-      });
+  async gerarPagamento(@Body() body: any) {
+    const { valueCents, name, email, planId, description } = body;
 
-      return {
-        ok: true,
-        paymentId: payment.paymentId,
-        qrCode: payment.qrCode,
-        expiresAt: payment.expiresAt,
-        raw,
-      };
-    } catch (err) {
-      this.logger.error('Erro gerarPagamento: ' + err.message);
-      throw new HttpException(
-        { ok: false, error: err.message },
-        HttpStatus.BAD_REQUEST,
+    if (!valueCents || !name || !email) {
+      throw new BadRequestException(
+        'valueCents, name e email são obrigatórios'
       );
     }
+
+    const result = await this.pixService.criarPagamento({
+      valueCents,
+      name,
+      email,
+      planId: planId ?? null,
+      description: description ?? 'Pagamento',
+    });
+
+    // Retorno limpinho pro front
+    return {
+      ok: true,
+      paymentId: result.payment.paymentId,
+      qrCode: result.payment.qrCode,
+      expiresAt: result.payment.expiresAt,
+      raw: result.raw, // retorna tudo que a wiin mandou
+    };
   }
 
-  // -----------------------------
-  // POST /pix/create  (rota NOVA)
-  // -----------------------------
-  @Post('create')
-  async createPagamento(
-    @Body()
-    body: {
-      valueCents: number;
-      name: string;
-      email: string;
-      planId?: string | null;
-      description?: string;
-    },
-  ) {
-    try {
-      const { payment, raw } = await this.pixService.criarPagamento({
-        valueCents: body.valueCents,
-        name: body.name,
-        email: body.email,
-        planId: body.planId ?? null,
-        description: body.description ?? 'Assinatura VIP',
-      });
+  /**
+   * Consultar status – usado pelo front ou bot do Telegram
+   * Rota: GET /pix/status/:id
+   */
+  @Get('status/:id')
+  async getStatus(@Param('id') id: string) {
+    if (!id) throw new BadRequestException('ID é obrigatório');
 
-      return {
-        ok: true,
-        paymentId: payment.paymentId,
-        qrCode: payment.qrCode,
-        expiresAt: payment.expiresAt,
-        raw,
-      };
-    } catch (err) {
-      this.logger.error('Erro createPagamento: ' + err.message);
-      throw new HttpException(
-        { ok: false, error: err.message },
-        HttpStatus.BAD_REQUEST,
-      );
-    }
+    return this.pixService.getStatusByPaymentIdOrCode(id);
   }
 }
-
