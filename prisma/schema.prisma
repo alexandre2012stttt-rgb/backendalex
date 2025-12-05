@@ -69,3 +69,4 @@ model Subscription {
   planId         String?
   plan           Plan?     @relation(fields: [planId], references: [id])
 }
+
