@@ -7,16 +7,15 @@ async function bootstrap() {
     rawBody: true,
   });
 
-  // RAW APENAS no webhook
+  // RAW APENAS para o webhook WiinPay
   app.use('/pix/webhook', raw({ type: '*/*' }));
 
   // JSON normal para todas as outras rotas
-  app.use(json());
-  app.use(
-    raw({
-      type: () => false, // impede raw de sobrescrever JSON
-    })
-  );
+  app.use(json({ limit: '10mb' }));
+
+  // ❗ Remover completamente qualquer raw secundário
+  // (este era o que estava bloqueando o JSON)
+  // app.use(raw({ type: () => false }));
 
   app.enableCors({
     origin: '*',
