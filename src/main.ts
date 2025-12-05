@@ -4,15 +4,22 @@ import { json, raw } from 'body-parser';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule, {
-    rawBody: true, // <-- ESSENCIAL PARA WEBHOOK
+    rawBody: true,
   });
 
-  // Body-parser para Webhook WiinPay
-  app.use(raw({ type: '*/*' }));
+  // RAW APENAS no webhook
+  app.use('/pix/webhook', raw({ type: '*/*' }));
+
+  // JSON normal para todas as outras rotas
   app.use(json());
+  app.use(
+    raw({
+      type: () => false, // impede raw de sobrescrever JSON
+    })
+  );
 
   app.enableCors({
-    origin: '*', // coloque seu domínio depois
+    origin: '*',
     methods: 'GET,POST,PUT,DELETE',
   });
 
