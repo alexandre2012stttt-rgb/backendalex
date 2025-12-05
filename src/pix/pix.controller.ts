@@ -1,4 +1,3 @@
-// src/pix/pix.controller.ts
 import {
   Controller,
   Post,
@@ -6,6 +5,7 @@ import {
   Get,
   Param,
   BadRequestException,
+  Headers,
 } from '@nestjs/common';
 import { PixService } from './pix.service';
 
@@ -13,10 +13,6 @@ import { PixService } from './pix.service';
 export class PixController {
   constructor(private readonly pixService: PixService) {}
 
-  /**
-   * Criar pagamento PIX – chamado pelo seu FRONT da V0
-   * Rota: POST /pix/gerar
-   */
   @Post('gerar')
   async gerarPagamento(@Body() body: any) {
     const { valueCents, name, email, planId, description } = body;
@@ -35,24 +31,28 @@ export class PixController {
       description: description ?? 'Pagamento',
     });
 
-    // Retorno limpinho pro front
     return {
       ok: true,
       paymentId: result.payment.paymentId,
       qrCode: result.payment.qrCode,
       expiresAt: result.payment.expiresAt,
-      raw: result.raw, // retorna tudo que a wiin mandou
+      raw: result.raw,
     };
   }
 
-  /**
-   * Consultar status – usado pelo front ou bot do Telegram
-   * Rota: GET /pix/status/:id
-   */
   @Get('status/:id')
   async getStatus(@Param('id') id: string) {
     if (!id) throw new BadRequestException('ID é obrigatório');
 
     return this.pixService.getStatusByPaymentIdOrCode(id);
+  }
+
+  // -------------------------------
+  // 🚀 ROTA DE WEBHOOK (ÚNICA ADIÇÃO)
+  // -------------------------------
+  @Post('webhook')
+  async webhook(@Body() body: any, @Headers() headers: any) {
+    console.log('📩 Webhook recebido:', body);
+    return this.pixService.processarWebhook(headers, body);
   }
 }
