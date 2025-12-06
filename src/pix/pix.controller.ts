@@ -18,29 +18,24 @@ export class PixController {
   // ---------------------------------------------------
   @Post('gerar')
   async gerarPagamento(@Body() body: any) {
-    const { valueCents, name, email, planId, planoId, description } = body;
+    const { plano, name, email } = body;
 
-    // Validação forte
-    if (
-      typeof valueCents !== 'number' ||
-      valueCents <= 0 ||
-      !name ||
-      !email
-    ) {
-      throw new BadRequestException(
-        'valueCents (number > 0), name e email são obrigatórios'
-      );
+    // 🔒 validações
+    if (!plano || typeof plano !== 'string') {
+      throw new BadRequestException('Campo "plano" é obrigatório');
     }
 
-    // Aceita planId ou planoId da v0
-    const finalPlanId = planId ?? planoId ?? null;
+    if (!name || !email) {
+      throw new BadRequestException('Campos "name" e "email" são obrigatórios');
+    }
 
+    // 👇 agora o controller só passa o necessário
     const result = await this.pixService.criarPagamento({
-      valueCents,
+      valueCents: 0,     // será ignorado, o backend define o preço
       name,
       email,
-      planId: finalPlanId,
-      description: description ?? 'Pagamento',
+      planId: plano,     // "1mes", "3meses", "6meses" vindo da v0
+      description: undefined,
     });
 
     return {

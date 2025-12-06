@@ -9,6 +9,20 @@ export class PixService {
 
   constructor(private readonly prisma: PrismaService) {}
 
+  /**
+   * Configuração local dos planos.
+   * A v0 manda em `planId` algo como "1mes", "3meses", "6meses"
+   * e o backend usa isso para definir preço e duração.
+   */
+  private readonly planosConfig: Record<
+    string,
+    { valueCents: number; durationDays: number; description: string }
+  > = {
+    '1mes':   { valueCents: 1500, durationDays: 30,  description: 'Plano 1 mês' },
+    '3meses': { valueCents: 3500, durationDays: 90,  description: 'Plano 3 meses' },
+    '6meses': { valueCents: 6000, durationDays: 180, description: 'Plano 6 meses' },
+  };
+
   // --- CRIAR PAGAMENTO (chama WiinPay e salva Payment no DB) ---
   async criarPagamento({
     valueCents,
@@ -20,7 +34,7 @@ export class PixService {
     valueCents: number;
     name: string;
     email: string;
-    planId?: string | null;
+    planId?: string | null; // aqui a v0 manda o "plano" clicado, ex: "1mes"
     description?: string;
   }) {
     const WIINPAY_API_KEY = process.env.WIINPAY_API_KEY;
@@ -32,20 +46,32 @@ export class PixService {
       throw new Error('WiinPay environment variables missing');
     }
 
-    // ⚠️ CORREÇÃO CRÍTICA: value deve ser número, não string
+    // Se veio um plano conhecido, usamos a config local (preço + duração).
+    const planoConfig = planId ? this.planosConfig[planId] : undefined;
+
+    const finalValueCents =
+      planoConfig?.valueCents && planoConfig.valueCents > 0
+        ? planoConfig.valueCents
+        : valueCents;
+
+    const durationDays = planoConfig?.durationDays ?? 30;
+    const finalDescription =
+      description ?? planoConfig?.description ?? 'Pagamento';
+
     const body = {
       api_key: WIINPAY_API_KEY,
-      value: valueCents / 100, // AGORA NUMÉRICO
+      value: finalValueCents / 100, // WiinPay espera valor em reais/float
       name,
       email,
-      description: description ?? 'Pagamento',
+      description: finalDescription,
       webhook_url: WIINPAY_CALLBACK_URL,
       metadata: {
-        planId: planId ?? null,
+        planCode: planId ?? null,    // código do plano vindo da v0
+        durationDays,                // dias de validade do plano
       },
     };
 
-    // 💡 Log opcional para debug (não salva dados sensíveis)
+    // Log opcional para debug (não salva dados sensíveis)
     this.logger.log(`Enviando pagamento WiinPay: ${JSON.stringify(body)}`);
 
     const res = await fetch(
@@ -54,7 +80,7 @@ export class PixService {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'Accept': 'application/json', // ⚠️ necessário para WiinPay
+          Accept: 'application/json',
         },
         body: JSON.stringify(body),
       },
@@ -93,15 +119,25 @@ export class PixService {
 
     const expiresAt = expiresRaw ? new Date(expiresRaw) : null;
 
+    // Guardar também as infos que nós definimos (plano, durationDays)
+    const mergedMetadata = {
+      ...data,
+      _localPlan: {
+        planCode: planId ?? null,
+        durationDays,
+      },
+    };
+
     const payment = await this.prisma.payment.create({
       data: {
         paymentId,
         status: 'PENDING',
-        amountCents: valueCents,
+        amountCents: finalValueCents,
         qrCode,
-        metadata: data ?? {},
+        metadata: mergedMetadata,
         expiresAt,
-        planId: planId ?? null,
+        // ⚠️ IMPORTANTE: não amarrar FK em Plan pra não dar P2003
+        planId: null,
       },
     });
 
@@ -159,9 +195,9 @@ export class PixService {
         .catch(() => null);
     }
 
-    if (!dbPayment && metadata?.paymentId) {
+    if (!dbPayment && (metadata as any)?.paymentId) {
       dbPayment = await this.prisma.payment
-        .findUnique({ where: { paymentId: metadata.paymentId } })
+        .findUnique({ where: { paymentId: (metadata as any).paymentId } })
         .catch(() => null);
     }
 
@@ -171,27 +207,27 @@ export class PixService {
 
     if (dbPayment) {
       if (status === 'PAID') {
-        const plan = dbPayment.planId
-          ? await this.prisma.plan.findUnique({
-              where: { id: dbPayment.planId },
-            })
-          : null;
+        // Duration baseado em metadata, não mais em tabela Plan
+        const mergedMeta = {
+          ...(dbPayment.metadata as any),
+          ...(metadata as any),
+        };
 
         const durationDays =
-          plan?.durationDays ?? metadata?.durationDays ?? 30;
+          mergedMeta._localPlan?.durationDays ??
+          mergedMeta.durationDays ??
+          30;
 
         const now = new Date();
-        const expiresAt = new Date(
-          now.getTime() + durationDays * 86400000,
-        );
+        const expiresAt = new Date(now.getTime() + durationDays * 86400000);
 
-        const result = await this.prisma.$transaction(async (tx) => {
+        await this.prisma.$transaction(async (tx) => {
           await tx.payment.update({
             where: { id: dbPayment.id },
             data: {
               status: 'PAID',
-              qrCode: body?.qrCode ?? dbPayment.qrCode,
-              metadata: { ...dbPayment.metadata, ...body },
+              qrCode: body?.qrCode ?? body?.qrcode ?? dbPayment.qrCode,
+              metadata: mergedMeta,
             },
           });
 
@@ -204,7 +240,8 @@ export class PixService {
               expiresAt,
               telegramUserId: null,
               paymentId: dbPayment.id,
-              planId: dbPayment.planId ?? null,
+              // ⚠️ Não amarrar mais em Plan
+              planId: null,
             },
           });
         });
@@ -217,7 +254,7 @@ export class PixService {
         where: { id: dbPayment.id },
         data: {
           status: status as any,
-          metadata: { ...dbPayment.metadata, ...body },
+          metadata: { ...(dbPayment.metadata as any), ...(metadata as any), body },
         },
       });
 
@@ -242,19 +279,21 @@ export class PixService {
         qrCode,
         metadata: body ?? {},
         expiresAt: body?.expiresAt ? new Date(body.expiresAt) : null,
-        planId: metadata?.planId ?? null,
+        // ⚠️ Não usar FK de Plan aqui também
+        planId: null,
       },
     });
 
     if (status === 'PAID') {
-      const plan = created.planId
-        ? await this.prisma.plan.findUnique({
-            where: { id: created.planId },
-          })
-        : null;
+      const mergedMeta = {
+        ...(created.metadata as any),
+        ...(metadata as any),
+      };
 
       const durationDays =
-        plan?.durationDays ?? metadata?.durationDays ?? 30;
+        mergedMeta._localPlan?.durationDays ??
+        mergedMeta.durationDays ??
+        30;
 
       const expiresAt = new Date(Date.now() + durationDays * 86400000);
 
@@ -267,7 +306,7 @@ export class PixService {
           expiresAt,
           telegramUserId: null,
           paymentId: created.id,
-          planId: created.planId ?? null,
+          planId: null,
         },
       });
     }
@@ -309,4 +348,5 @@ export class PixService {
     };
   }
 }
+
 
