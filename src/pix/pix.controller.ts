@@ -14,20 +14,25 @@ export class PixController {
   constructor(private readonly pixService: PixService) {}
 
   // ---------------------------------------------------
-  // 🚀 ROTA PARA GERAR PAGAMENTO PIX
+  // 🚀 GERAR PAGAMENTO PIX
   // ---------------------------------------------------
   @Post('gerar')
   async gerarPagamento(@Body() body: any) {
     const { valueCents, name, email, planId, planoId, description } = body;
 
-    // ⛔ Se o body vier vazio, cai aqui (ex: main.ts errado)
-    if (!valueCents || !name || !email) {
+    // Validação forte
+    if (
+      typeof valueCents !== 'number' ||
+      valueCents <= 0 ||
+      !name ||
+      !email
+    ) {
       throw new BadRequestException(
-        'valueCents, name e email são obrigatórios'
+        'valueCents (number > 0), name e email são obrigatórios'
       );
     }
 
-    // 🔥 Aceita planId OU planoId da v0
+    // Aceita planId ou planoId da v0
     const finalPlanId = planId ?? planoId ?? null;
 
     const result = await this.pixService.criarPagamento({
@@ -43,7 +48,6 @@ export class PixController {
       paymentId: result.payment.paymentId,
       qrCode: result.payment.qrCode,
       expiresAt: result.payment.expiresAt,
-      raw: result.raw,
     };
   }
 
@@ -53,16 +57,15 @@ export class PixController {
   @Get('status/:id')
   async getStatus(@Param('id') id: string) {
     if (!id) throw new BadRequestException('ID é obrigatório');
-
     return this.pixService.getStatusByPaymentIdOrCode(id);
   }
 
   // ---------------------------------------------------
-  // 📩 ROTA DO WEBHOOK (WiinPay → Render)
+  // 📩 WEBHOOK (WiinPay → Render)
   // ---------------------------------------------------
   @Post('webhook')
   async webhook(@Body() body: any, @Headers() headers: any) {
-    console.log('📩 Webhook recebido:', body);
+    console.log('📩 Webhook recebido:', JSON.stringify(body));
     return this.pixService.processarWebhook(headers, body);
   }
 }

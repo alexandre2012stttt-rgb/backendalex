@@ -9,7 +9,7 @@ export class PixService {
 
   constructor(private readonly prisma: PrismaService) {}
 
-  // --- CRIAR PAGAMENTO (chama WiinPay v2 e salva Payment no DB) ---
+  // --- CRIAR PAGAMENTO (chama WiinPay e salva Payment no DB) ---
   async criarPagamento({
     valueCents,
     name,
@@ -28,13 +28,14 @@ export class PixService {
     const WIINPAY_CALLBACK_URL = process.env.WIINPAY_CALLBACK_URL;
 
     if (!WIINPAY_API_KEY || !WIINPAY_API_URL || !WIINPAY_CALLBACK_URL) {
-      this.logger.error('WiinPay env missing');
+      this.logger.error('WiinPay environment variables missing');
       throw new Error('WiinPay environment variables missing');
     }
 
+    // ⚠️ CORREÇÃO CRÍTICA: value deve ser número, não string
     const body = {
       api_key: WIINPAY_API_KEY,
-      value: (valueCents / 100).toFixed(2),
+      value: valueCents / 100, // AGORA NUMÉRICO
       name,
       email,
       description: description ?? 'Pagamento',
@@ -44,13 +45,20 @@ export class PixService {
       },
     };
 
-    const res = await fetch(`${WIINPAY_API_URL.replace(/\/$/, '')}/payment/create`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
+    // 💡 Log opcional para debug (não salva dados sensíveis)
+    this.logger.log(`Enviando pagamento WiinPay: ${JSON.stringify(body)}`);
+
+    const res = await fetch(
+      `${WIINPAY_API_URL.replace(/\/$/, '')}/payment/create`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json', // ⚠️ necessário para WiinPay
+        },
+        body: JSON.stringify(body),
       },
-      body: JSON.stringify(body),
-    });
+    );
 
     const rawText = await res.text();
     let data: any = {};
@@ -58,18 +66,30 @@ export class PixService {
     try {
       data = rawText ? JSON.parse(rawText) : {};
     } catch (err) {
-      this.logger.error('WiinPay invalid response: ' + rawText);
+      this.logger.error('WiinPay invalid JSON: ' + rawText);
       throw new Error('WiinPay returned invalid JSON');
     }
 
     if (!res.ok) {
-      this.logger.error('WiinPay create payment error: ' + JSON.stringify(data));
+      this.logger.error(
+        'WiinPay create payment error: ' + JSON.stringify(data),
+      );
       throw new Error('WiinPay create payment failed');
     }
 
-    const paymentId = data.paymentId ?? data.id ?? data.reference ?? data.payment_id ?? null;
-    const qrCode = data.qrcode ?? data.qrCode ?? data.qr ?? data.code ?? null;
-    const expiresRaw = data.expiresAt ?? data.expires_at ?? data.expire_at ?? data.expires ?? null;
+    // Tentativas de pegar os campos retornados pela WiinPay
+    const paymentId =
+      data.paymentId ?? data.id ?? data.reference ?? data.payment_id ?? null;
+
+    const qrCode =
+      data.qrcode ?? data.qrCode ?? data.qr ?? data.code ?? null;
+
+    const expiresRaw =
+      data.expiresAt ??
+      data.expires_at ??
+      data.expire_at ??
+      data.expires ??
+      null;
 
     const expiresAt = expiresRaw ? new Date(expiresRaw) : null;
 
@@ -110,7 +130,9 @@ export class PixService {
       }
     }
 
-    const statusRaw = body?.status ?? body?.paymentStatus ?? body?.state ?? null;
+    const statusRaw =
+      body?.status ?? body?.paymentStatus ?? body?.state ?? null;
+
     const status = String(statusRaw ?? '').toUpperCase();
 
     const paymentId =
@@ -128,9 +150,7 @@ export class PixService {
       return { ok: false, reason: 'missing_status' };
     }
 
-    // ----------------------------------------------------
-    // FIX: dbPayment tipado como ANY
-    // ----------------------------------------------------
+    // Buscar pagamento
     let dbPayment: any = null;
 
     if (paymentId) {
@@ -152,16 +172,21 @@ export class PixService {
     if (dbPayment) {
       if (status === 'PAID') {
         const plan = dbPayment.planId
-          ? await this.prisma.plan.findUnique({ where: { id: dbPayment.planId } })
+          ? await this.prisma.plan.findUnique({
+              where: { id: dbPayment.planId },
+            })
           : null;
 
-        const durationDays = plan?.durationDays ?? metadata?.durationDays ?? 30;
+        const durationDays =
+          plan?.durationDays ?? metadata?.durationDays ?? 30;
 
         const now = new Date();
-        const expiresAt = new Date(now.getTime() + durationDays * 24 * 60 * 60 * 1000);
+        const expiresAt = new Date(
+          now.getTime() + durationDays * 86400000,
+        );
 
         const result = await this.prisma.$transaction(async (tx) => {
-          const updated = await tx.payment.update({
+          await tx.payment.update({
             where: { id: dbPayment.id },
             data: {
               status: 'PAID',
@@ -172,7 +197,7 @@ export class PixService {
 
           const code = randomBytes(8).toString('hex').toUpperCase();
 
-          const subscription = await tx.subscription.create({
+          await tx.subscription.create({
             data: {
               code,
               status: 'ACTIVE',
@@ -182,8 +207,6 @@ export class PixService {
               planId: dbPayment.planId ?? null,
             },
           });
-
-          return { updated, subscription };
         });
 
         this.logger.log(`Pagamento PAID: ${dbPayment.paymentId}`);
@@ -201,7 +224,9 @@ export class PixService {
       return { ok: true };
     }
 
-    const qrCode = body?.qrcode ?? body?.qrCode ?? body?.qr ?? null;
+    // Caso o pagamento ainda não exista no banco
+    const qrCode =
+      body?.qrcode ?? body?.qrCode ?? body?.qr ?? null;
 
     const amount =
       body?.value ?? body?.amount ?? body?.amountCents ?? null;
@@ -223,10 +248,13 @@ export class PixService {
 
     if (status === 'PAID') {
       const plan = created.planId
-        ? await this.prisma.plan.findUnique({ where: { id: created.planId } })
+        ? await this.prisma.plan.findUnique({
+            where: { id: created.planId },
+          })
         : null;
 
-      const durationDays = plan?.durationDays ?? metadata?.durationDays ?? 30;
+      const durationDays =
+        plan?.durationDays ?? metadata?.durationDays ?? 30;
 
       const expiresAt = new Date(Date.now() + durationDays * 86400000);
 
@@ -281,3 +309,4 @@ export class PixService {
     };
   }
 }
+
