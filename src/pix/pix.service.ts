@@ -2,6 +2,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { randomBytes, createHmac } from 'crypto';
+import { Payment } from '@prisma/client';
 
 @Injectable()
 export class PixService {
@@ -10,20 +11,21 @@ export class PixService {
   constructor(private readonly prisma: PrismaService) {}
 
   /**
-   * Configuração local dos planos.
-   * A v0 manda em `planId` algo como "1mes", "3meses", "6meses"
-   * e o backend usa isso para definir preço e duração.
+   * Configuração dos planos que a v0 envia (1mes, 3meses, 6meses, teste)
    */
   private readonly planosConfig: Record<
     string,
     { valueCents: number; durationDays: number; description: string }
   > = {
+    teste:   { valueCents: 300,  durationDays: 1,   description: 'Plano Teste 10 minutos' },
     '1mes':   { valueCents: 1500, durationDays: 30,  description: 'Plano 1 mês' },
     '3meses': { valueCents: 3500, durationDays: 90,  description: 'Plano 3 meses' },
     '6meses': { valueCents: 6000, durationDays: 180, description: 'Plano 6 meses' },
   };
 
-  // --- CRIAR PAGAMENTO (chama WiinPay e salva Payment no DB) ---
+  // -------------------------------------------------------
+  // 🔵 CRIAR PAGAMENTO WIINPAY
+  // -------------------------------------------------------
   async criarPagamento({
     valueCents,
     name,
@@ -34,7 +36,7 @@ export class PixService {
     valueCents: number;
     name: string;
     email: string;
-    planId?: string | null; // aqui a v0 manda o "plano" clicado, ex: "1mes"
+    planId?: string | null;
     description?: string;
   }) {
     const WIINPAY_API_KEY = process.env.WIINPAY_API_KEY;
@@ -42,37 +44,36 @@ export class PixService {
     const WIINPAY_CALLBACK_URL = process.env.WIINPAY_CALLBACK_URL;
 
     if (!WIINPAY_API_KEY || !WIINPAY_API_URL || !WIINPAY_CALLBACK_URL) {
-      this.logger.error('WiinPay environment variables missing');
+      this.logger.error('FALTAM variáveis WIINPAY_* no backend Render');
       throw new Error('WiinPay environment variables missing');
     }
 
-    // Se veio um plano conhecido, usamos a config local (preço + duração).
+    // Definir preço & duração baseado no plano
     const planoConfig = planId ? this.planosConfig[planId] : undefined;
 
     const finalValueCents =
-      planoConfig?.valueCents && planoConfig.valueCents > 0
-        ? planoConfig.valueCents
-        : valueCents;
+      planoConfig?.valueCents ?? valueCents;
 
-    const durationDays = planoConfig?.durationDays ?? 30;
+    const durationDays =
+      planoConfig?.durationDays ?? 30;
+
     const finalDescription =
       description ?? planoConfig?.description ?? 'Pagamento';
 
     const body = {
       api_key: WIINPAY_API_KEY,
-      value: finalValueCents / 100, // WiinPay espera valor em reais/float
+      value: finalValueCents / 100,
       name,
       email,
       description: finalDescription,
       webhook_url: WIINPAY_CALLBACK_URL,
       metadata: {
-        planCode: planId ?? null,    // código do plano vindo da v0
-        durationDays,                // dias de validade do plano
-      },
+        planCode: planId ?? null,
+        durationDays,
+      }
     };
 
-    // Log opcional para debug (não salva dados sensíveis)
-    this.logger.log(`Enviando pagamento WiinPay: ${JSON.stringify(body)}`);
+    this.logger.log(`➡️ Enviando pagamento WiinPay: ${JSON.stringify(body)}`);
 
     const res = await fetch(
       `${WIINPAY_API_URL.replace(/\/$/, '')}/payment/create`,
@@ -92,41 +93,25 @@ export class PixService {
     try {
       data = rawText ? JSON.parse(rawText) : {};
     } catch (err) {
-      this.logger.error('WiinPay invalid JSON: ' + rawText);
+      this.logger.error('WiinPay retornou JSON inválido: ' + rawText);
       throw new Error('WiinPay returned invalid JSON');
     }
 
     if (!res.ok) {
-      this.logger.error(
-        'WiinPay create payment error: ' + JSON.stringify(data),
-      );
+      this.logger.error('❌ ERRO WiinPay create: ' + JSON.stringify(data));
       throw new Error('WiinPay create payment failed');
     }
 
-    // Tentativas de pegar os campos retornados pela WiinPay
     const paymentId =
-      data.paymentId ?? data.id ?? data.reference ?? data.payment_id ?? null;
+      data.paymentId ?? data.id ?? data.reference ?? null;
 
     const qrCode =
-      data.qrcode ?? data.qrCode ?? data.qr ?? data.code ?? null;
+      data.qrcode ?? data.qrCode ?? data.qr ?? null;
 
     const expiresRaw =
-      data.expiresAt ??
-      data.expires_at ??
-      data.expire_at ??
-      data.expires ??
-      null;
+      data.expiresAt ?? data.expires_at ?? null;
 
     const expiresAt = expiresRaw ? new Date(expiresRaw) : null;
-
-    // Guardar também as infos que nós definimos (plano, durationDays)
-    const mergedMetadata = {
-      ...data,
-      _localPlan: {
-        planCode: planId ?? null,
-        durationDays,
-      },
-    };
 
     const payment = await this.prisma.payment.create({
       data: {
@@ -134,19 +119,30 @@ export class PixService {
         status: 'PENDING',
         amountCents: finalValueCents,
         qrCode,
-        metadata: mergedMetadata,
+        metadata: {
+          ...data,
+          _localPlan: {
+            planCode: planId ?? null,
+            durationDays,
+          }
+        },
         expiresAt,
-        // ⚠️ IMPORTANTE: não amarrar FK em Plan pra não dar P2003
-        planId: null,
+        planId: null, // nunca usa plano do banco
       },
     });
 
-    return { payment, raw: data };
+    return {
+      payment,
+      raw: data,
+    };
   }
 
-  // --- PROCESSAR WEBHOOK ---
+  // -------------------------------------------------------
+  // 📩 PROCESSAR WEBHOOK (WIINPAY → BACKEND)
+  // -------------------------------------------------------
   async processarWebhook(headers: Record<string, any>, body: any) {
     const secret = process.env.WIINPAY_WEBHOOK_SECRET;
+
     const sigHeader =
       headers?.['x-wiinpay-signature'] ??
       headers?.['x-wiinpay_signature'] ??
@@ -158,12 +154,10 @@ export class PixService {
         const hmac = createHmac('sha256', secret).update(raw).digest('hex');
 
         if (!String(sigHeader).includes(hmac) && String(sigHeader) !== hmac) {
-          this.logger.warn('Invalid webhook signature');
+          this.logger.warn('⚠️ Webhook com assinatura inválida');
           return { ok: false, reason: 'invalid_signature' };
         }
-      } catch (e) {
-        this.logger.warn('Signature validation failed');
-      }
+      } catch {}
     }
 
     const statusRaw =
@@ -175,119 +169,42 @@ export class PixService {
       body?.paymentId ??
       body?.id ??
       body?.reference ??
-      body?.payment_id ??
-      body?.data?.id ??
       null;
 
-    const metadata = body?.metadata ?? body?.meta ?? {};
+    const metadata = body?.metadata ?? {};
 
-    if (!status) {
-      this.logger.warn('Webhook sem status válido');
-      return { ok: false, reason: 'missing_status' };
-    }
-
-    // Buscar pagamento
-    let dbPayment: any = null;
+    // Buscar pagamento no banco -----------------------
+    let dbPayment: Payment | null = null;
 
     if (paymentId) {
-      dbPayment = await this.prisma.payment
-        .findUnique({ where: { paymentId } })
-        .catch(() => null);
+      dbPayment = await this.prisma.payment.findUnique({
+        where: { paymentId }
+      }).catch(() => null);
     }
 
     if (!dbPayment && (metadata as any)?.paymentId) {
-      dbPayment = await this.prisma.payment
-        .findUnique({ where: { paymentId: (metadata as any).paymentId } })
-        .catch(() => null);
+      dbPayment = await this.prisma.payment.findUnique({
+        where: { paymentId: (metadata as any).paymentId }
+      }).catch(() => null);
     }
 
-    if (dbPayment && dbPayment.status === 'PAID') {
+    if (!dbPayment) {
+      return { ok: false, reason: 'payment_not_found' };
+    }
+
+    // Já processado?
+    if (dbPayment.status === 'PAID') {
       return { ok: true, reason: 'already_processed' };
     }
 
-    if (dbPayment) {
-      if (status === 'PAID') {
-        // Duration baseado em metadata, não mais em tabela Plan
-        const mergedMeta = {
-          ...(dbPayment.metadata as any),
-          ...(metadata as any),
-        };
-
-        const durationDays =
-          mergedMeta._localPlan?.durationDays ??
-          mergedMeta.durationDays ??
-          30;
-
-        const now = new Date();
-        const expiresAt = new Date(now.getTime() + durationDays * 86400000);
-
-        await this.prisma.$transaction(async (tx) => {
-          await tx.payment.update({
-            where: { id: dbPayment.id },
-            data: {
-              status: 'PAID',
-              qrCode: body?.qrCode ?? body?.qrcode ?? dbPayment.qrCode,
-              metadata: mergedMeta,
-            },
-          });
-
-          const code = randomBytes(8).toString('hex').toUpperCase();
-
-          await tx.subscription.create({
-            data: {
-              code,
-              status: 'ACTIVE',
-              expiresAt,
-              telegramUserId: null,
-              paymentId: dbPayment.id,
-              // ⚠️ Não amarrar mais em Plan
-              planId: null,
-            },
-          });
-        });
-
-        this.logger.log(`Pagamento PAID: ${dbPayment.paymentId}`);
-        return { ok: true };
-      }
-
-      await this.prisma.payment.update({
-        where: { id: dbPayment.id },
-        data: {
-          status: status as any,
-          metadata: { ...(dbPayment.metadata as any), ...(metadata as any), body },
-        },
-      });
-
-      return { ok: true };
-    }
-
-    // Caso o pagamento ainda não exista no banco
-    const qrCode =
-      body?.qrcode ?? body?.qrCode ?? body?.qr ?? null;
-
-    const amount =
-      body?.value ?? body?.amount ?? body?.amountCents ?? null;
-
-    const amountCents =
-      typeof amount === 'number' ? Math.round(amount * 100) : 0;
-
-    const created = await this.prisma.payment.create({
-      data: {
-        paymentId: paymentId ?? null,
-        status: status === 'PAID' ? 'PAID' : (status as any),
-        amountCents,
-        qrCode,
-        metadata: body ?? {},
-        expiresAt: body?.expiresAt ? new Date(body.expiresAt) : null,
-        // ⚠️ Não usar FK de Plan aqui também
-        planId: null,
-      },
-    });
-
+    // -------------------------------------------------------
+    // STATUS = PAID → criar assinatura e finalizar pagamento
+    // -------------------------------------------------------
     if (status === 'PAID') {
       const mergedMeta = {
-        ...(created.metadata as any),
+        ...(dbPayment.metadata as any),
         ...(metadata as any),
+        body
       };
 
       const durationDays =
@@ -295,29 +212,55 @@ export class PixService {
         mergedMeta.durationDays ??
         30;
 
-      const expiresAt = new Date(Date.now() + durationDays * 86400000);
+      const now = new Date();
+      const expiresAt =
+        new Date(now.getTime() + durationDays * 86400000);
 
-      const code = randomBytes(8).toString('hex').toUpperCase();
+      await this.prisma.$transaction(async (tx) => {
+        await tx.payment.update({
+          where: { id: dbPayment.id },
+          data: {
+            status: 'PAID',
+            qrCode: body?.qrCode ?? body?.qrcode ?? dbPayment.qrCode,
+            metadata: mergedMeta,
+          },
+        });
 
-      await this.prisma.subscription.create({
-        data: {
-          code,
-          status: 'ACTIVE',
-          expiresAt,
-          telegramUserId: null,
-          paymentId: created.id,
-          planId: null,
-        },
+        const code = randomBytes(8).toString('hex').toUpperCase();
+
+        await tx.subscription.create({
+          data: {
+            code,
+            status: 'ACTIVE',
+            expiresAt,
+            telegramUserId: null,
+            paymentId: dbPayment.id,
+            planId: null,
+          },
+        });
       });
+
+      this.logger.log(`💰 Pagamento confirmado: ${dbPayment.paymentId}`);
+      return { ok: true };
     }
+
+    // -------------------------------------------------------
+    // STATUS ≠ PAID → atualizar pagamento
+    // -------------------------------------------------------
+    await this.prisma.payment.update({
+      where: { id: dbPayment.id },
+      data: {
+        status: status as any,
+        metadata: { ...(dbPayment.metadata as any), body },
+      },
+    });
 
     return { ok: true };
   }
 
-  private generateCode(length = 9) {
-    return randomBytes(16).toString('hex').slice(0, length).toUpperCase();
-  }
-
+  // -------------------------------------------------------
+  // 🔍 CONSULTAR STATUS
+  // -------------------------------------------------------
   async getStatusByPaymentIdOrCode(idOrCode: string) {
     const payment = await this.prisma.payment.findUnique({
       where: { paymentId: idOrCode },
@@ -333,9 +276,7 @@ export class PixService {
     }
 
     const sub = await this.prisma.subscription.findFirst({
-      where: {
-        OR: [{ id: idOrCode }, { code: idOrCode }],
-      },
+      where: { OR: [{ id: idOrCode }, { code: idOrCode }] },
     });
 
     if (!sub) return { status: 'not_found' };
